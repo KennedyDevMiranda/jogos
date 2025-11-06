@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <!-- Metadados básicos do documento -->
+  <meta charset="UTF-8" /> <!-- Define a codificação para acentos corretamente -->
+  <meta name="viewport" content="width=device-width, initial-scale=1" /> <!-- Layout responsivo em celulares -->
+  <title>Jogo de Dados (Ataque / Defender / Curar)</title> <!-- Título da aba -->
+  <style>
+    /* --- Estilos simples e legíveis (nada de frameworks) --- */
+    :root { font-family: system-ui, Arial, sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    .wrap { max-width: 900px; margin: 24px auto; padding: 16px; }
+    .title { font-size: 24px; margin: 0 0 12px; font-weight: 700; }
+    .subtitle { margin: 0 0 16px; opacity: .85; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 16px; }
+    .row { display: flex; align-items: center; gap: 12px; }
+    .grow { flex: 1; }
+    .hpbar { height: 12px; background: #334155; border-radius: 999px; overflow: hidden; }
+    .hpbar > div { height: 100%; background: #22c55e; }
+    .label { font-size: 12px; opacity: .8; }
+    .name { font-weight: 700; font-size: 18px; }
+    .buttons { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    button { background: #2563eb; color: white; border: none; border-radius: 8px; padding: 10px 12px; cursor: pointer; }
+    button.secondary { background: #374151; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .log { background: #0b1220; border: 1px solid #1f2937; border-radius: 12px; padding: 12px; max-height: 260px; overflow: auto; font-size: 14px; }
+    .log p { margin: 6px 0; }
+    .footer { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+    .die { background: #1f2937; border-radius: 8px; padding: 6px 8px; }
+    .badge { background: #111827; border: 1px solid #1f2937; padding: 4px 8px; border-radius: 999px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <!-- Container principal da página -->
+  <div class="wrap">
+    <h1 class="title">Jogo de Dados — HTML/JS</h1> <!-- Título grande visual -->
+    <p class="subtitle">Turnos alternados. Ações: <b>atacar</b>, <b>defender</b>, <b>curar</b>. Regras espelhadas do protótipo em Python.</p>
+
+    <!-- Placar e estado dos jogadores -->
+    <div class="grid" id="players">
+      <!-- O conteúdo é preenchido via JS para manter UI e estado sincronizados -->
+    </div>
+
+    <!-- Botões de ação do jogador da vez -->
+    <div class="card" style="margin-top:16px">
+      <div class="row">
+        <div class="grow">
+          <div class="label">Vez de</div>
+          <div class="name" id="turnName">—</div> <!-- exibe o nome do jogador da vez -->
+        </div>
+        <div class="badge">Dado: <span id="dieOut">-</span></div> <!-- mostra o último valor do dado -->
+      </div>
+      <div class="buttons" style="margin-top:10px">
+        <!-- Três ações mapeadas para métodos do Rules -->
+        <button id="btnAtacar">Atacar</button>
+        <button id="btnDefender" class="secondary">Defender</button>
+        <button id="btnCurar" class="secondary">Curar</button>
+        <button id="btnReset" style="margin-left:auto" class="secondary">Reiniciar</button>
+      </div>
+      <div class="footer">
+        <span class="badge" id="gameState">Em andamento</span>
+      </div>
+    </div>
+
+    <!-- Log de eventos da partida -->
+    <div class="card" style="margin-top:16px">
+      <div class="label">Eventos</div>
+      <div class="log" id="log"></div> <!-- onde as mensagens são adicionadas -->
+    </div>
+  </div>
+
+  <script>
+    // ==========================
+    // Utilidades básicas
+    // ==========================
+    const d6 = () => Math.floor(Math.random() * 6) + 1; // rola um dado de 6 faces
+
+    // Função auxiliar para criar elementos com classes/atributos
+    function h(tag, attrs = {}, children = []) {
+      const el = document.createElement(tag);
+      Object.entries(attrs).forEach(([k, v]) => {
+        if (k === 'class') el.className = v;            // aplica classes CSS
+        else if (k === 'text') el.textContent = v;      // texto direto
+        else el.setAttribute(k, v);                     // outros atributos
+      });
+      children.forEach(c => el.appendChild(c));         // anexa filhos
+      return el;
+    }
+
+    // ==========================
+    // Efeitos (buff/debuff)
+    // ==========================
+    class Effect {
+      // name: rótulo; duration_turns: turnos do dono; duration_offensive_turns: turnos ofensivos do oponente; value: número auxiliar
+      constructor(name, duration_turns = 0, duration_offensive_turns = 0, value = null) {
+        this.name = name;
+        this.duration_turns = duration_turns;
+        this.duration_offensive_turns = duration_offensive_turns;
+        this.value = value;
+      }
+      tick() { if (this.duration_turns > 0) this.duration_turns--; } // consome 1 turno do dono
+      tickOffensive() { if (this.duration_offensive_turns > 0) this.duration_offensive_turns--; } // consome 1 turno ofensivo do oponente
+    }
+
+    // ==========================
+    // Jogador
+    // ==========================
+    class Player {
+      constructor(name) {
+        this.name = name;                 // nome
+        this.hp = 5;                      // vida atual
+        this.max_hp = 5;                  // vida máxima
+        this.effects = [];                // lista de Effect
+        this.classe = null;               // classe ativa (não usado nesta versão da UI)
+        // flags auxiliares
+        this._last_heal_rolls = [];
+        this._defend_last_roll = null;
+        this._shield_tokens = 0;
+        this._accumulated_damage_multiplier = 1;
+        this._was_at_max_and_died_instantly = false;
+        this._has_2x = false;
+        this._has_intang = false;
+        this._has_healed = false;
+        this._has_won_before = false;
+        this._won_without_damage = false;
+        this._turns_played = 0;
+        this._attack_same_three_in_row = false;
+      }
+      // Aplica mitigação/transformação de dano de acordo com efeitos ativos
+      applyEffectsOnIncomingDamage(damage) {
+        let reduced = damage;
+        for (const eff of [...this.effects]) { // percorre cópia
+          if (eff.name === 'juggernaut_shield' && eff.value) {
+            reduced = Math.max(0, reduced - eff.value); // reduz dano
+          }
+          if (eff.name === 'aliado_convert_next_damage' && eff.duration_turns > 0) {
+            this.heal(damage);   // converte dano em cura
+            reduced = 0;
+            eff.duration_turns = 0; // consome efeito
+          }
+        }
+        return reduced; // retorna quanto de dano realmente será aplicado
+      }
+      tickEffects() {
+        for (const eff of [...this.effects]) { // decai turnos
+          eff.tick();
+          if (eff.duration_turns === 0 && eff.duration_offensive_turns === 0) {
+            const idx = this.effects.indexOf(eff);
+            if (idx >= 0) this.effects.splice(idx, 1); // remove expirados
+          }
+        }
+      }
+      heal(amount) {
+        if (amount <= 0) return;         // ignora curas não-positivas
+        this.hp = Math.min(this.max_hp, this.hp + amount);
+        this._has_healed = true;         // marca que já curou
+      }
+      takeDamage(amount) {
+        if (amount <= 0) return;         // ignora dano não-positivo
+        const real = this.applyEffectsOnIncomingDamage(amount); // calcula mitigação
+        this.hp = Math.max(0, this.hp - real); // aplica dano garantindo >=0
+      }
+      isDead() { return this.hp <= 0; }  // helper de morte
+    }
+
+    // ==========================
+    // Regras do jogo (ataque/defesa/cura)
+    // ==========================
+    class Rules {
+      attack(attacker, defender) {
+        const roll = d6();                          // rola o dado
+        const result = { action: 'attack', roll, damage: 0 };
+        if (roll === 1) {
+          defender.effects.push(new Effect('opponent_double_next', 0, 1)); // oponente causa 2x no próximo ataque
+        } else if (roll === 2) {
+          attacker.takeDamage(2);                   // auto-dano 2
+        } else if (roll === 3) {
+          attacker.takeDamage(1);                   // auto-dano 1
+        } else if (roll === 4) {
+          const dmg = 1; result.damage = dmg; defender.takeDamage(dmg); // causa 1
+        } else if (roll === 5) {
+          const dmg = 2; result.damage = dmg; defender.takeDamage(dmg); // causa 2
+        } else if (roll === 6) {
+          attacker.effects.push(new Effect('attacker_double_next', 1, 0)); // dobra próximo ataque
+        }
+        return result; // retorna objeto simples para log
+      }
+      defend(defender, opponent) {
+        const roll = d6();
+        defender._defend_last_roll = roll;          // salva último roll
+        const result = { action: 'defend', roll };
+        if (roll === 1) {
+          opponent.effects.push(new Effect('opponent_no_damage_next', 0, 1)); // oponente sem dano no próximo ataque
+        } else if (roll === 2) {
+          opponent.effects.push(new Effect('opponent_defend_1_for_2', 0, 2, 1)); // reduz 1 por 2 turnos ofensivos
+        } else if (roll === 3) {
+          opponent.effects.push(new Effect('opponent_defend_1_for_1', 0, 1, 1)); // reduz 1 por 1 turno ofensivo
+        } else if (roll === 4) {
+          defender.effects.push(new Effect('defend_1_for_1', 1, 0, 1)); // escudo 1 por 1 turno
+          defender._shield_tokens++;
+        } else if (roll === 5) {
+          defender.effects.push(new Effect('defend_1_for_2', 2, 0, 1)); // escudo 1 por 2 turnos
+          defender._shield_tokens++;
+        } else if (roll === 6) {
+          defender.effects.push(new Effect('intangibility_next', 1, 0)); // intangível 1 turno (você pode decidir anular dano em applyEffects)
+          defender._has_intang = true;
+        }
+        return result;
+      }
+      heal(player, opponent) {
+        const roll = d6();
+        player._last_heal_rolls.push(roll);         // histórico para desbloqueios
+        if (player._last_heal_rolls.length > 10)
+          player._last_heal_rolls = player._last_heal_rolls.slice(-10);
+        const result = { action: 'heal', roll, healed: 0 };
+        if (roll === 1) {
+          opponent.heal(3);                         // cura o inimigo 3
+        } else if (roll === 2) {
+          opponent.heal(2);
+        } else if (roll === 3) {
+          opponent.heal(1);
+        } else if (roll === 4) {
+          player.heal(1); result.healed = 1;        // cura 1
+        } else if (roll === 5) {
+          player.heal(2); result.healed = 2;        // cura 2
+        } else if (roll === 6) {
+          player.max_hp += 1; player.hp = player.max_hp; result.healed = 'full_plus_max'; // cura total + +1 vida máx
+        }
+        return result;
+      }
+    }
+
+    // ==========================
+    // Partida (Game): turnos e loop
+    // ==========================
+    class Game {
+      constructor(p1, p2, rules) {
+        this.p1 = p1;                    // referência jogador 1
+        this.p2 = p2;                    // referência jogador 2
+        this.rules = rules;              // regras em uso
+        this.turn = 0;                   // 0 -> p1 joga, 1 -> p2
+        this.lastRoll = '-';             // guarda último dado p/ UI
+      }
+      currentPlayers() { return this.turn === 0 ? [this.p1, this.p2] : [this.p2, this.p1]; }
+      nextTurn() { this.turn = 1 - this.turn; }      // alterna
+      performAction(action) {
+        const [actor, target] = this.currentPlayers();
+        actor._turns_played++;                         // conta turno
+        let res;
+        if (action === 'atacar') res = this.rules.attack(actor, target);
+        else if (action === 'defender') res = this.rules.defend(actor, target);
+        else if (action === 'curar') res = this.rules.heal(actor, target);
+        else throw new Error('Ação desconhecida');
+
+        this.lastRoll = res.roll;                      // armazena valor do dado
+
+        // Consome 1 "turno do dono" em ambos os lados
+        actor.tickEffects();
+        target.tickEffects();
+
+        // Consome 1 "turno ofensivo" no alvo (o alvo esteve defendendo contra o atacante)
+        for (const eff of [...target.effects]) eff.tickOffensive();
+
+        // Troca a vez
+        this.nextTurn();
+        return res;                                    // retorna para log
+      }
+      winner() {
+        if (this.p1.isDead()) return this.p2;
+        if (this.p2.isDead()) return this.p1;
+        return null;                                   // sem vencedor ainda
+      }
+    }
+
+    // ==========================
+    // UI (renderização e interações)
+    // ==========================
+    const $players = document.getElementById('players');
+    const $log = document.getElementById('log');
+    const $dieOut = document.getElementById('dieOut');
+    const $turnName = document.getElementById('turnName');
+    const $gameState = document.getElementById('gameState');
+
+    const $btnAtacar = document.getElementById('btnAtacar');
+    const $btnDefender = document.getElementById('btnDefender');
+    const $btnCurar = document.getElementById('btnCurar');
+    const $btnReset = document.getElementById('btnReset');
+
+    // Cria instâncias iniciais
+    let game; // será inicializado em reset()
+
+    function log(msg) { // adiciona uma linha no log
+      const p = document.createElement('p');
+      p.textContent = msg;
+      $log.prepend(p); // adiciona no topo para ver o mais recente primeiro
+    }
+
+    function renderPlayers() { // redesenha os dois cards de jogador
+      $players.innerHTML = '';
+      for (const p of [game.p1, game.p2]) {
+        const percent = Math.max(0, (p.hp / p.max_hp) * 100); // % da barra de vida
+        const card = h('div', { class: 'card' }, [
+          h('div', { class: 'row' }, [
+            h('div', { class: 'name', text: p.name }),
+            h('div', { class: 'badge', text: `HP ${p.hp}/${p.max_hp}` })
+          ]),
+          h('div', { class: 'hpbar' }, [ h('div', { style: `width:${percent}%;` }) ]),
+          h('div', { class: 'label', text: `Efeitos: ${p.effects.map(e => e.name).join(', ') || '—'}` })
+        ]);
+        $players.appendChild(card);
+      }
+      const [actor] = game.currentPlayers();
+      $turnName.textContent = actor.name;         // mostra quem joga
+      $dieOut.textContent = game.lastRoll;        // mostra último dado
+    }
+
+    function setButtonsEnabled(on) { // habilita/desabilita ações
+      $btnAtacar.disabled = !on; $btnDefender.disabled = !on; $btnCurar.disabled = !on;
+    }
+
+    function checkEnd() { // verifica vencedor e trava UI
+      const w = game.winner();
+      if (w) {
+        $gameState.textContent = `Vencedor: ${w.name}`; // mostra vencedor
+        setButtonsEnabled(false);                       // trava botões
+        return true;
+      }
+      $gameState.textContent = 'Em andamento';
+      return false;
+    }
+
+    function act(action) { // executa uma ação do turno atual
+      const [actor, target] = game.currentPlayers();
+      const res = game.performAction(action);          // aplica regra
+      // Texto simples para o log com base na ação
+      if (action === 'atacar') log(`${actor.name} atacou ${target.name} (dado ${res.roll}) dano=${res.damage}`);
+      if (action === 'defender') log(`${actor.name} defendeu (dado ${res.roll})`);
+      if (action === 'curar') log(`${actor.name} curou (dado ${res.roll}) heal=${res.healed}`);
+      renderPlayers();                                 // atualiza UI
+      checkEnd();                                      // avalia fim
+    }
+
+    function reset() { // recomeça a partida do zero
+      const a = new Player('Jogador 1');                 // cria jogador A
+      const b = new Player('Jogador 2');                     // cria jogador B
+      const rules = new Rules();                       // instancia regras
+      game = new Game(a, b, rules);                    // cria partida
+      $log.innerHTML = '';                             // limpa log
+      setButtonsEnabled(true);                         // habilita botões
+      renderPlayers();                                 // desenha estado inicial
+    }
+
+    // Liga botões aos handlers de ação
+    $btnAtacar.addEventListener('click', () => act('atacar'));
+    $btnDefender.addEventListener('click', () => act('defender'));
+    $btnCurar.addEventListener('click', () => act('curar'));
+    $btnReset.addEventListener('click', reset);
+
+    // Inicializa a tela
+    reset();
+  </script>
+</body>
+</html>
